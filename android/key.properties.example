@@ -1,0 +1,5 @@
+# Copy this file to key.properties. The real file and keystore are ignored.
+storeFile=/absolute/path/to/offixia-upload.jks
+storePassword=replace-me
+keyAlias=offixia
+keyPassword=replace-me

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive icon, used from Android 8 onwards. The launcher supplies the
+     mask, so the two layers must survive being cropped to a circle, squircle
+     or rounded square; the glyph is kept inside the inner 66% safe zone.
+
+     The monochrome layer is what Android 13's themed icons use to tint the
+     app to the user's wallpaper palette. -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+    <monochrome android:drawable="@mipmap/ic_launcher_monochrome" />
+</adaptive-icon>

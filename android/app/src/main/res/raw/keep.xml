@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The notification icon is never referenced from code or from a layout: the
+     notifications plugin resolves it by name at runtime via getIdentifier().
+     The resource shrinker only sees static references, so without this rule it
+     compiles into R.txt, gets stripped from the release APK, and the plugin
+     fails at startup with invalid_icon. That silently disables every alert in
+     release builds while debug keeps working.
+
+     Note for future edits: an XML comment may not contain a double hyphen. -->
+<resources
+    xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@drawable/ic_stat_offixia" />

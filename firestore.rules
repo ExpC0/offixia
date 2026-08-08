@@ -1,0 +1,1044 @@
+rules_version = '2';
+
+// Offixia access rules.
+//
+// The client decides what to *show*; this file decides what is *allowed*. The
+// two encode the same ladder (employee < manager < hr < dgm < gm < md) and
+// be changed together, but only this one is enforced.
+//
+// Every helper that needs to know the caller's role reads their employee
+// document in the org being touched. That read is the reason the employee
+// document id is the auth uid: it turns "who is this person here?" into a
+// single get() instead of a query, which rules cannot do.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function memberDoc(orgId) {
+      return get(/databases/$(database)/documents/organizations/$(orgId)/employees/$(request.auth.uid));
+    }
+
+    function isMember(orgId) {
+      return signedIn() && exists(/databases/$(database)/documents/organizations/$(orgId)/employees/$(request.auth.uid));
+    }
+
+    // An employee switched off by HR keeps their documents but loses access.
+    function isActiveMember(orgId) {
+      return isMember(orgId) && memberDoc(orgId).data.active == true;
+    }
+
+    function myRole(orgId) {
+      return memberDoc(orgId).data.role;
+    }
+
+    // The designation ladder, mirroring lib/models/role.dart. 'boss' is the
+    // old name for 'md' and still appears on existing employee documents.
+    function rank(role) {
+      return (role == 'md' || role == 'boss') ? 5
+           : role == 'gm' ? 4
+           : role == 'dgm' ? 3
+           : role == 'hr' ? 2
+           : role == 'manager' ? 1
+           : 0;
+    }
+
+    // Compared against md's rank rather than a bare literal, so adding a role
+    // above MD later cannot silently leave this pointing at the wrong tier.
+    function isTopRole(orgId) {
+      return isActiveMember(orgId)
+             && rank(myRole(orgId)) >= rank('md');
+    }
+
+    // The person who created the company. Deliberately identity, not title:
+    // someone can be promoted to MD, but there is only ever one founder, and
+    // they are the only person with nobody above them to answer to.
+    function isOwner(orgId) {
+      return isActiveMember(orgId)
+             && get(/databases/$(database)/documents/organizations/$(orgId))
+                  .data.ownerUid == request.auth.uid;
+    }
+
+    // This survives deletion of the owner's employee record while the
+    // organization cleanup is still removing top-level pointers.
+    function ownsOrg(orgId) {
+      return signedIn()
+             && get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerUid == request.auth.uid;
+    }
+
+    function membershipPointsTo(orgId) {
+      return signedIn()
+             && exists(/databases/$(database)/documents/memberships/$(request.auth.uid))
+             && get(/databases/$(database)/documents/memberships/$(request.auth.uid)).data.orgId == orgId
+             // A missing employee is a stale-pointer repair case. An inactive
+             // employee is a suspension and must not regain org access via
+             // the top-level membership pointer.
+             && (
+               !exists(/databases/$(database)/documents/organizations/$(orgId)/employees/$(request.auth.uid))
+               || get(/databases/$(database)/documents/organizations/$(orgId)/employees/$(request.auth.uid)).data.active == true
+             );
+    }
+
+    // Individual authorities granted to one person on top of their
+    // designation. Always additive: a grant can widen what someone may do,
+    // never narrow it, so `can()` is an OR of the two sources.
+    function grantsOf(orgId) {
+      return memberDoc(orgId).data.get('grants', []);
+    }
+
+    function hasGrant(orgId, name) {
+      return isActiveMember(orgId) && name in grantsOf(orgId);
+    }
+
+    function can(orgId, role, grant) {
+      return atLeast(orgId, role) || hasGrant(orgId, grant);
+    }
+
+    // Rank for the purpose of administering *other people*.
+    //
+    // A managePeople grant would otherwise be inert: an Employee holding it
+    // sees the Manage panel, but every write is rejected because the target
+    // must rank strictly below them and nobody ranks below rank 0. The grant
+    // carries HR-level standing over people, and no further -- it never lifts
+    // anyone past someone who already outranks them.
+    function peopleRank(orgId) {
+      return hasGrant(orgId, 'managePeople') && rank(myRole(orgId)) < rank('hr')
+        ? rank('hr')
+        : rank(myRole(orgId));
+    }
+
+    function atLeast(orgId, role) {
+      return isActiveMember(orgId) && rank(myRole(orgId)) >= rank(role);
+    }
+
+    // The signed-in user's own email, lowercased. Invite documents are keyed
+    // by it, which is what lets somebody who belongs to no company yet read
+    // exactly one invite: their own.
+    function myEmail() {
+      return request.auth.token.email is string
+        ? request.auth.token.email.lower()
+        : '';
+    }
+
+    function myInvite() {
+      return get(/databases/$(database)/documents/invites/$(myEmail())).data;
+    }
+
+    function hasInviteTo(orgId) {
+      return myEmail() != ''
+             && exists(/databases/$(database)/documents/invites/$(myEmail()))
+             && myInvite().orgId == orgId;
+    }
+
+    // Fields the request leaves untouched. Used to prove an update changed
+    // nothing outside an allowed set.
+    function changed() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    function employeeAfter(orgId, uid) {
+      return getAfter(/databases/$(database)/documents/organizations/$(orgId)/employees/$(uid)).data;
+    }
+
+    function membershipAfter(uid) {
+      return getAfter(/databases/$(database)/documents/memberships/$(uid)).data;
+    }
+
+    function orgAfter(orgId) {
+      return getAfter(/databases/$(database)/documents/organizations/$(orgId)).data;
+    }
+
+    function createsActiveEmployee(orgId, uid) {
+      return existsAfter(/databases/$(database)/documents/organizations/$(orgId)/employees/$(uid))
+             && employeeAfter(orgId, uid).active == true
+             && employeeAfter(orgId, uid).joinedAt == request.time;
+    }
+
+    function createsMembershipFor(orgId, uid) {
+      return existsAfter(/databases/$(database)/documents/memberships/$(uid))
+             && membershipAfter(uid).orgId == orgId
+             && membershipAfter(uid).joinedAt == request.time;
+    }
+
+    function isFounderJoin(orgId, uid) {
+      return !exists(/databases/$(database)/documents/organizations/$(orgId))
+             && existsAfter(/databases/$(database)/documents/organizations/$(orgId))
+             && orgAfter(orgId).ownerUid == uid
+             && employeeAfter(orgId, uid).role == 'md';
+    }
+
+    function isCodeJoin(orgId, uid) {
+      return exists(/databases/$(database)/documents/organizations/$(orgId))
+             && membershipAfter(uid).get('joinCode', '') is string
+             && membershipAfter(uid).get('joinCode', '')
+                == get(/databases/$(database)/documents/organizations/$(orgId)).data.joinCode
+             && exists(/databases/$(database)/documents/joinCodes/$(membershipAfter(uid).get('joinCode', '')))
+             && get(/databases/$(database)/documents/joinCodes/$(membershipAfter(uid).get('joinCode', ''))).data.orgId == orgId
+             && employeeAfter(orgId, uid).role == 'employee';
+    }
+
+    function isInvitedJoin(orgId, uid) {
+      return hasInviteTo(orgId)
+             && employeeAfter(orgId, uid).role == myInvite().role;
+    }
+
+    // ---------------------------------------------------------------
+    // memberships/{uid} -- which org a user belongs to. Private to them.
+    // ---------------------------------------------------------------
+    match /memberships/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      // A membership is accepted only when the matching active employee is
+      // created atomically through one of the three real entry paths. A
+      // forged pointer by itself can never confer tenant access.
+      allow create: if signedIn()
+                    && request.auth.uid == uid
+                    && request.resource.data.keys().hasOnly([
+                      'orgId', 'joinedAt', 'joinCode'
+                    ])
+                    && request.resource.data.keys().hasAll([
+                      'orgId', 'joinedAt'
+                    ])
+                    && request.resource.data.joinedAt == request.time
+                    && createsActiveEmployee(request.resource.data.orgId, uid)
+                    && (
+                      isFounderJoin(request.resource.data.orgId, uid)
+                      || isCodeJoin(request.resource.data.orgId, uid)
+                      || isInvitedJoin(request.resource.data.orgId, uid)
+                    );
+      allow update: if false;
+      // Deleted when you leave a company, and when the MD deletes it out from
+      // under everyone. Only ever your own pointer.
+      allow delete: if signedIn() && (
+        request.auth.uid == uid || ownsOrg(resource.data.orgId)
+      );
+    }
+
+    // ---------------------------------------------------------------
+    // joinCodes/{code} -- direct lookup from invite code to org id.
+    //
+    // A signed-in user may get a code they already know, but may never list or
+    // query the collection. Creation is tied to an atomic organization create
+    // or owner-controlled code rotation, so codes cannot be squatted.
+    // ---------------------------------------------------------------
+    match /joinCodes/{code} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if signedIn()
+                    && request.resource.data.keys().hasOnly(['orgId', 'createdAt'])
+                    && request.resource.data.orgId is string
+                    && request.resource.data.createdAt == request.time
+                    && existsAfter(/databases/$(database)/documents/organizations/$(request.resource.data.orgId))
+                    && orgAfter(request.resource.data.orgId).joinCode == code
+                    && (
+                      (
+                        !exists(/databases/$(database)/documents/organizations/$(request.resource.data.orgId))
+                        && orgAfter(request.resource.data.orgId).ownerUid == request.auth.uid
+                      )
+                      || (
+                        isOwner(request.resource.data.orgId)
+                        && get(/databases/$(database)/documents/organizations/$(request.resource.data.orgId)).data.joinCode != code
+                        && !existsAfter(/databases/$(database)/documents/joinCodes/$(get(/databases/$(database)/documents/organizations/$(request.resource.data.orgId)).data.joinCode))
+                      )
+                    );
+      allow update: if false;
+      // Released when the organization is deleted or its owner atomically
+      // replaces this code with a new one.
+      allow delete: if ownsOrg(resource.data.orgId)
+                    && (
+                      !existsAfter(/databases/$(database)/documents/organizations/$(resource.data.orgId))
+                      || orgAfter(resource.data.orgId).joinCode != code
+                    );
+    }
+
+    // ---------------------------------------------------------------
+    // invites/{email} -- a place held for someone who has not signed in yet.
+    //
+    // The app cannot create a Firebase Auth account for another person, so
+    // "add an employee by email" records an intention instead: when that
+    // address first signs in, the designation waiting here is applied and they
+    // skip the invite-code screen entirely.
+    //
+    // Keyed by lowercased email and stored top-level, because the person who
+    // needs to read one is not a member of anything yet and so cannot read
+    // anything under the organization.
+    // ---------------------------------------------------------------
+    match /invites/{email} {
+      // Your own invite, or any invite belonging to a company you may add
+      // people to. The second clause is what makes the pending list work.
+      allow read: if signedIn()
+                  && (
+                    email == myEmail()
+                    || can(resource.data.orgId, 'hr', 'inviteEmployees')
+                  );
+
+      allow create: if can(request.resource.data.orgId, 'hr', 'inviteEmployees')
+                    && request.resource.data.invitedByUid == request.auth.uid
+                    // Nobody may invite straight into a designation at or
+                    // above their own.
+                    && rank(request.resource.data.role)
+                       < rank(myRole(request.resource.data.orgId));
+
+      allow update: if false;
+
+      // Withdrawn by the inviter, and consumed by the invitee on arrival.
+      allow delete: if signedIn()
+                    && (
+                      email == myEmail()
+                      || can(resource.data.orgId, 'hr', 'inviteEmployees')
+                    );
+    }
+
+    // ---------------------------------------------------------------
+    // organizations/{orgId}
+    // ---------------------------------------------------------------
+    match /organizations/{orgId} {
+      // A stale pointer may outlive its employee record after an interrupted
+      // delete. Reading the pointed-to org lets startup reach self-repair.
+      allow read: if membershipPointsTo(orgId);
+      allow read: if isActiveMember(orgId);
+
+      // Anyone signed in may create an org, but only naming themselves owner.
+      allow create: if signedIn()
+                    && request.resource.data.ownerUid == request.auth.uid
+                    && request.resource.data.keys().hasOnly([
+                      'name', 'joinCode', 'ownerUid', 'workdayStartMinutes',
+                      'employeeIdPrefix', 'nextEmployeeSeq', 'geofenceMetres',
+                      'createdAt'
+                    ])
+                    && request.resource.data.createdAt == request.time
+                    && request.resource.data.joinCode is string
+                    && request.resource.data.joinCode.size() == 6
+                    && request.resource.data.nextEmployeeSeq == 2
+                    && request.resource.data.workdayStartMinutes >= 480
+                    && request.resource.data.workdayStartMinutes <= 540
+                    && createsActiveEmployee(orgId, request.auth.uid)
+                    && createsMembershipFor(orgId, request.auth.uid)
+                    && existsAfter(/databases/$(database)/documents/joinCodes/$(request.resource.data.joinCode))
+                    && getAfter(/databases/$(database)/documents/joinCodes/$(request.resource.data.joinCode)).data.orgId == orgId;
+
+      // Settings are the owner's. The join code and ownership are immutable
+      // here so neither can be quietly reassigned.
+      allow update: if atLeast(orgId, 'md')
+                    && changed().hasOnly([
+                      'name', 'workdayStartMinutes', 'officeLat', 'officeLng',
+                      'geofenceMetres'
+                    ])
+                    && request.resource.data.ownerUid == resource.data.ownerUid
+                    && request.resource.data.joinCode == resource.data.joinCode
+                    && request.resource.data.workdayStartMinutes >= 480
+                    && request.resource.data.workdayStartMinutes <= 540;
+
+      // Counter allocation must be in the same transaction as either a valid
+      // join or the caller's one-time legacy employee-number backfill. This
+      // prevents arbitrary authenticated clients from burning staff numbers.
+      allow update: if signedIn()
+                    && changed().hasOnly(['nextEmployeeSeq'])
+                    && request.resource.data.nextEmployeeSeq
+                       == resource.data.get('nextEmployeeSeq', 1) + 1
+                    && (
+                      (
+                        !isMember(orgId)
+                        && createsActiveEmployee(orgId, request.auth.uid)
+                        && createsMembershipFor(orgId, request.auth.uid)
+                      )
+                      || (
+                        isActiveMember(orgId)
+                        && memberDoc(orgId).data.get('employeeId', '') == ''
+                        && employeeAfter(orgId, request.auth.uid).employeeId is string
+                        && employeeAfter(orgId, request.auth.uid).employeeId != ''
+                      )
+                    );
+
+      // The founder may rotate the invite code, but only as a three-write
+      // atomic change: update the org, remove the old lookup, add the new one.
+      allow update: if isOwner(orgId)
+                    && changed().hasOnly(['joinCode'])
+                    && request.resource.data.joinCode is string
+                    && request.resource.data.joinCode.size() == 6
+                    && !existsAfter(/databases/$(database)/documents/joinCodes/$(resource.data.joinCode))
+                    && existsAfter(/databases/$(database)/documents/joinCodes/$(request.resource.data.joinCode))
+                    && getAfter(/databases/$(database)/documents/joinCodes/$(request.resource.data.joinCode)).data.orgId == orgId;
+
+      // Deleting the company is the MD's alone. The client walks the
+      // subcollections first; this only authorises the final parent delete.
+      allow delete: if signedIn()
+                    && resource.data.ownerUid == request.auth.uid;
+
+      // -------------------------------------------------------------
+      // employees/{uid}
+      // -------------------------------------------------------------
+      match /employees/{employeeId} {
+        // A missing self-profile must still be observable so the client can
+        // repair a stale membership after an interrupted organization delete.
+        allow read: if signedIn() && request.auth.uid == employeeId;
+        allow read: if isActiveMember(orgId);
+
+        // Two legitimate creates: the owner's own record as the org is made,
+        // and a new joiner adding themselves. Both are only ever about
+        // yourself, and a joiner may not mint themselves a privileged role.
+        // Three legitimate creates: the founder's own record as the company is
+        // made, a new joiner adding themselves with the invite code, and
+        // someone accepting an emailed invite. Only the last may arrive with a
+        // designation above employee, and only the one the invite names --
+        // checked against the invite document, never taken from the client.
+        allow create: if signedIn()
+                      && request.auth.uid == employeeId
+                      && request.resource.data.active == true
+                      && request.resource.data.joinedAt == request.time
+                      && request.resource.data.keys().hasOnly([
+                        'employeeId', 'name', 'email', 'photoUrl', 'role',
+                        'department', 'jobTitle', 'phone', 'managerUid',
+                        'active', 'joinedAt'
+                      ])
+                      && request.resource.data.keys().hasAll([
+                        'employeeId', 'name', 'email', 'photoUrl', 'role',
+                        'department', 'jobTitle', 'phone', 'managerUid',
+                        'active', 'joinedAt'
+                      ])
+                      && !exists(/databases/$(database)/documents/memberships/$(request.auth.uid))
+                      && createsMembershipFor(orgId, request.auth.uid)
+                      && (
+                        isFounderJoin(orgId, request.auth.uid)
+                        || isCodeJoin(orgId, request.auth.uid)
+                        || isInvitedJoin(orgId, request.auth.uid)
+                      );
+
+        // Editing yourself: the profile fields only. Role, active and
+        // managerUid are excluded, so a client cannot promote itself.
+        allow update: if signedIn()
+                      && request.auth.uid == employeeId
+                      && changed().hasOnly([
+                        'name', 'jobTitle', 'department', 'phone', 'photoUrl'
+                      ]);
+
+        // Backfilling your own staff number. Records created before numbering
+        // existed have none, and this lets the app fill the gap on next open
+        // rather than needing an admin to sweep the directory. Write-once: it
+        // is only allowed while the field is absent or empty.
+        allow update: if signedIn()
+                      && request.auth.uid == employeeId
+                      && changed().hasOnly(['employeeId'])
+                      && resource.data.get('employeeId', '') == ''
+                      && request.resource.data.employeeId is string
+                      && request.resource.data.employeeId != '';
+
+        // HR and above may administer other people, but never someone at or
+        // above their own rank -- that stops HR demoting the MD, or promoting
+        // anyone into a designation they do not themselves outrank.
+        //
+        // `grants` is excluded here: handing someone an authority outside
+        // their designation is the one power HR does not get.
+        allow update: if can(orgId, 'hr', 'managePeople')
+                      && request.auth.uid != employeeId
+                      && rank(resource.data.role) < peopleRank(orgId)
+                      && rank(request.resource.data.role) < peopleRank(orgId)
+                      && !changed().hasAny(['grants']);
+
+        // Individual authorities: GM and MD only, and still never on someone
+        // who outranks you.
+        allow update: if atLeast(orgId, 'gm')
+                      && request.auth.uid != employeeId
+                      && rank(resource.data.role) < rank(myRole(orgId))
+                      && changed().hasOnly(['grants']);
+
+        // Leaving the company yourself, or being removed by HR and above.
+        allow delete: if signedIn() && request.auth.uid == employeeId;
+
+        allow delete: if can(orgId, 'hr', 'managePeople')
+                      && request.auth.uid != employeeId
+                      && rank(resource.data.role) < rank(myRole(orgId));
+      }
+
+      // -------------------------------------------------------------
+      // attendance/{recordId} -- id is `{uid}_{yyyy-MM-dd}`
+      // -------------------------------------------------------------
+      match /attendance/{recordId} {
+        function isOwnAttendanceId() {
+          // Today's document is read before it exists so the app can present
+          // a friendly "already checked in" message. Authorize that known
+          // self path from its uid-prefixed id; resource.data is unavailable
+          // on a missing document and previously made this get fail.
+          return recordId.matches(request.auth.uid + '_.*');
+        }
+
+        // A direct get of your own known id works even before creation.
+        allow get: if isActiveMember(orgId)
+                   && (
+                     isOwnAttendanceId()
+                     || can(orgId, 'manager', 'viewAllAttendance')
+                   );
+
+        // Queries still prove ownership from every returned document.
+        allow list: if isActiveMember(orgId)
+                    && (
+                      resource.data.uid == request.auth.uid
+                      || can(orgId, 'manager', 'viewAllAttendance')
+                    );
+
+        // You may only punch for yourself, and the timestamps must be the
+        // server's -- otherwise the whole record is self-reported and a late
+        // arrival could simply claim an earlier time.
+        allow create: if isActiveMember(orgId)
+                      && request.resource.data.uid == request.auth.uid
+                      && request.resource.data.checkInAt == request.time;
+
+        allow update: if isActiveMember(orgId)
+                      && resource.data.uid == request.auth.uid
+                      && changed().hasOnly([
+                        'checkOutAt', 'checkOutLat', 'checkOutLng'
+                      ])
+                      && request.resource.data.checkOutAt == request.time;
+
+        // History is not the employee's to erase.
+        allow delete: if atLeast(orgId, 'hr');
+      }
+
+      // -------------------------------------------------------------
+      // leaveRequests/{requestId}
+      // -------------------------------------------------------------
+      match /leaveRequests/{requestId} {
+        allow read: if isActiveMember(orgId)
+                    && (
+                      resource.data.uid == request.auth.uid
+                      || can(orgId, 'hr', 'approveLeave')
+                      || (
+                        atLeast(orgId, 'manager')
+                        && resource.data.managerUid == request.auth.uid
+                      )
+                    );
+
+        // Filed for yourself, and always starting as pending.
+        allow create: if isActiveMember(orgId)
+                      && request.resource.data.uid == request.auth.uid
+                      && request.resource.data.status == 'pending';
+
+        // Withdrawing your own still-pending request.
+        allow update: if isActiveMember(orgId)
+                      && resource.data.uid == request.auth.uid
+                      && resource.data.status == 'pending'
+                      && changed().hasOnly(['status'])
+                      && request.resource.data.status == 'cancelled';
+
+        // Deciding a request. HR and above decide anything; a manager only
+        // for their own reports.
+        //
+        // Self-approval is blocked for everyone except the founder. HR holds
+        // company-wide approval but still cannot sign off their own absence
+        // -- that escalates to whoever is above them, which is exactly who
+        // granted them the authority in the first place. The founder is the
+        // one exception, having nobody above them, and without that exception
+        // a company that is still just its creator could approve nothing.
+        allow update: if isActiveMember(orgId)
+                      && (
+                        resource.data.uid != request.auth.uid
+                        || isOwner(orgId)
+                      )
+                      && resource.data.status == 'pending'
+                      && (
+                        can(orgId, 'hr', 'approveLeave')
+                        || (
+                          atLeast(orgId, 'manager')
+                          && resource.data.managerUid == request.auth.uid
+                        )
+                      )
+                      && changed().hasOnly([
+                        'status', 'decidedByUid', 'decidedByName',
+                        'decidedAt', 'decisionNote'
+                      ])
+                      && request.resource.data.decidedByUid == request.auth.uid
+                      && (
+                        request.resource.data.status == 'approved'
+                        || request.resource.data.status == 'rejected'
+                      );
+
+        allow delete: if atLeast(orgId, 'hr');
+      }
+
+      // -------------------------------------------------------------
+      // tasks/{taskId}
+      // -------------------------------------------------------------
+      match /tasks/{taskId} {
+        // Tasks are not confidential within a company, and the board views
+        // need the whole collection.
+        allow read: if isActiveMember(orgId);
+
+        allow create: if can(orgId, 'manager', 'assignTasks')
+                      && request.resource.data.createdByUid == request.auth.uid
+                      && request.resource.data.status == 'todo';
+
+        // A team lead assigning work inside their own team.
+        //
+        // Leads often hold no designation above Employee, so they have no
+        // company-wide authority to hand out tasks -- but running a team
+        // without being able to give its members work is not running it. The
+        // task must name the team, and this reads that team to confirm the
+        // caller really leads it and the assignee really is in it. The team
+        // document is the source of truth; nothing is taken on the client's
+        // word.
+        allow create: if isActiveMember(orgId)
+                      && request.resource.data.createdByUid == request.auth.uid
+                      && request.resource.data.status == 'todo'
+                      && request.resource.data.teamId is string
+                      && leadsTeamWith(
+                           orgId,
+                           request.resource.data.teamId,
+                           request.resource.data.assigneeUid
+                         );
+
+        // The assignee moves it along the board but may not rewrite the work.
+        allow update: if isActiveMember(orgId)
+                      && resource.data.assigneeUid == request.auth.uid
+                      && changed().hasOnly(['status', 'completedAt']);
+
+        // The person who set it, or HR and above, may edit or reassign it.
+        allow update: if isActiveMember(orgId)
+                      && (
+                        resource.data.createdByUid == request.auth.uid
+                        || atLeast(orgId, 'hr')
+                      );
+
+        allow delete: if isActiveMember(orgId)
+                      && (
+                        resource.data.createdByUid == request.auth.uid
+                        || atLeast(orgId, 'hr')
+                      );
+      }
+
+      // True when the caller leads the named team and the person named is one
+      // of its members. Used to let a team lead assign work without giving
+      // them authority over anybody outside that team.
+      function leadsTeamWith(orgId, teamId, assigneeUid) {
+        return exists(/databases/$(database)/documents/organizations/$(orgId)/teams/$(teamId))
+               && teamDoc(orgId, teamId).leadUid == request.auth.uid
+               && assigneeUid in teamDoc(orgId, teamId).memberUids;
+      }
+
+      function callDoc(orgId, callId) {
+        return get(/databases/$(database)/documents/organizations/$(orgId)/calls/$(callId)).data;
+      }
+
+      function groupCallDoc(orgId, callId) {
+        return get(/databases/$(database)/documents/organizations/$(orgId)/groupCalls/$(callId)).data;
+      }
+
+      function teamDoc(orgId, teamId) {
+        return get(/databases/$(database)/documents/organizations/$(orgId)/teams/$(teamId)).data;
+      }
+
+      // -------------------------------------------------------------
+      // calls/{callId} -- WebRTC signalling
+      //
+      // Holds the handshake and nothing else: the SDP offer and answer, and
+      // the ICE candidates each phone discovers. Media never passes through
+      // here. Once the two peers connect, audio and video go directly between
+      // the handsets, encrypted by DTLS-SRTP, and no key material is ever
+      // written to these documents.
+      //
+      // Readable and writable only by the two people on the call.
+      // -------------------------------------------------------------
+      match /calls/{callId} {
+        function onCall() {
+          return isActiveMember(orgId)
+                 && (
+                   request.auth.uid == resource.data.callerUid
+                   || request.auth.uid == resource.data.calleeUid
+                 );
+        }
+
+        allow read: if isOwner(orgId) || onCall();
+
+        // You may only ring an active colleague as yourself. The exact field
+        // set prevents a caller from smuggling authority-bearing data into a
+        // signalling document that future code might accidentally trust.
+        allow create: if isActiveMember(orgId)
+                      && request.resource.data.callerUid == request.auth.uid
+                      && request.resource.data.calleeUid != request.auth.uid
+                      && exists(/databases/$(database)/documents/organizations/$(orgId)/employees/$(request.resource.data.calleeUid))
+                      && get(/databases/$(database)/documents/organizations/$(orgId)/employees/$(request.resource.data.calleeUid)).data.active == true
+                      && request.resource.data.status == 'ringing'
+                      && request.resource.data.createdAt == request.time
+                      && request.resource.data.kind in ['audio', 'video']
+                      && request.resource.data.keys().hasOnly([
+                        'callerUid', 'callerName', 'callerPhotoUrl',
+                        'calleeUid', 'calleeName', 'kind', 'status', 'offer',
+                        'createdAt'
+                      ]);
+
+        // Only the callee answers a ringing call, and the server stamps the
+        // transition. SDP is signalling data, never authorization data.
+        allow update: if onCall()
+                      && request.auth.uid == resource.data.calleeUid
+                      && resource.data.status == 'ringing'
+                      && request.resource.data.status == 'active'
+                      && request.resource.data.answeredAt == request.time
+                      && changed().hasOnly([
+                        'answer', 'status', 'answeredAt'
+                      ]);
+
+        allow update: if onCall()
+                      && request.auth.uid == resource.data.calleeUid
+                      && resource.data.status == 'ringing'
+                      && request.resource.data.status == 'declined'
+                      && request.resource.data.endedAt == request.time
+                      && changed().hasOnly(['status', 'endedAt']);
+
+        // Either endpoint may end a ring or an active call, but cannot rewrite
+        // identities, SDP or timestamps while doing so.
+        allow update: if onCall()
+                      && resource.data.status in ['ringing', 'active']
+                      && request.resource.data.status == 'ended'
+                      && request.resource.data.endedAt == request.time
+                      && changed().hasOnly(['status', 'endedAt']);
+
+        allow delete: if isOwner(orgId) || onCall();
+
+        // Trickle ICE: each side writes candidates as it finds them and reads
+        // the other's. Append-only, because a candidate is a fact about the
+        // network at a moment and there is nothing to revise.
+        match /{candidates}/{candidateId} {
+          function onParentCall() {
+            return isActiveMember(orgId)
+                   && (
+                     request.auth.uid == callDoc(orgId, callId).callerUid
+                     || request.auth.uid == callDoc(orgId, callId).calleeUid
+                   );
+          }
+
+          allow read: if isOwner(orgId) || onParentCall();
+
+          allow create: if onParentCall()
+                        && (
+                          (
+                            candidates == 'callerCandidates'
+                            && request.auth.uid == callDoc(orgId, callId).callerUid
+                          )
+                          || (
+                            candidates == 'calleeCandidates'
+                            && request.auth.uid == callDoc(orgId, callId).calleeUid
+                          )
+                        )
+                        && request.resource.data.keys().hasOnly([
+                          'candidate', 'sdpMid', 'sdpMLineIndex'
+                        ]);
+          allow update: if false;
+          allow delete: if isOwner(orgId);
+        }
+      }
+
+      // -------------------------------------------------------------
+      // groupCalls/{callId} -- at most four directly connected phones
+      // -------------------------------------------------------------
+      match /groupCalls/{callId} {
+        function invited() {
+          return isActiveMember(orgId)
+                 && request.auth.uid in resource.data.invitedUids;
+        }
+
+        allow read: if isOwner(orgId) || invited();
+
+        allow create: if isActiveMember(orgId)
+                      && request.resource.data.callerUid == request.auth.uid
+                      && request.auth.uid in request.resource.data.invitedUids
+                      && request.resource.data.invitedUids.size() >= 2
+                      && request.resource.data.invitedUids.size() <= 4
+                      && request.resource.data.joinedUids == [request.auth.uid]
+                      && request.resource.data.declinedUids.size() == 0
+                      && request.resource.data.leftUids.size() == 0
+                      && request.resource.data.status == 'ringing'
+                      && request.resource.data.createdAt == request.time
+                      && request.resource.data.kind in ['audio', 'video']
+                      && exists(/databases/$(database)/documents/organizations/$(orgId)/chats/$(request.resource.data.chatId))
+                      && request.auth.uid in get(/databases/$(database)/documents/organizations/$(orgId)/chats/$(request.resource.data.chatId)).data.memberUids
+                      && get(/databases/$(database)/documents/organizations/$(orgId)/chats/$(request.resource.data.chatId)).data.memberUids.hasAll(request.resource.data.invitedUids)
+                      && request.resource.data.keys().hasOnly([
+                        'chatId', 'groupName', 'callerUid', 'callerName',
+                        'kind', 'invitedUids', 'joinedUids', 'declinedUids',
+                        'leftUids', 'status', 'createdAt'
+                      ]);
+
+        // Joining preserves everyone already present and may only transition
+        // ringing to active. The invite list and identities are immutable.
+        allow update: if invited()
+                      && request.auth.uid in resource.data.invitedUids
+                      && !(request.auth.uid in resource.data.joinedUids)
+                      && request.auth.uid in request.resource.data.joinedUids
+                      && request.resource.data.joinedUids.hasAll(resource.data.joinedUids)
+                      && request.resource.data.joinedUids.size() == resource.data.joinedUids.size() + 1
+                      && request.resource.data.status == 'active'
+                      && resource.data.status in ['ringing', 'active']
+                      && changed().hasOnly(['joinedUids', 'status']);
+
+        allow update: if invited()
+                      && request.auth.uid in resource.data.invitedUids
+                      && resource.data.status in ['ringing', 'active']
+                      && !(request.auth.uid in resource.data.declinedUids)
+                      && request.auth.uid in request.resource.data.declinedUids
+                      && request.resource.data.declinedUids.hasAll(resource.data.declinedUids)
+                      && request.resource.data.declinedUids.size() == resource.data.declinedUids.size() + 1
+                      && changed().hasOnly(['declinedUids']);
+
+        allow update: if invited()
+                      && request.auth.uid != resource.data.callerUid
+                      && request.auth.uid in resource.data.joinedUids
+                      && !(request.auth.uid in request.resource.data.joinedUids)
+                      && request.auth.uid in request.resource.data.leftUids
+                      && request.resource.data.leftUids.hasAll(resource.data.leftUids)
+                      && request.resource.data.joinedUids.size() == resource.data.joinedUids.size() - 1
+                      && request.resource.data.leftUids.size() == resource.data.leftUids.size() + 1
+                      && changed().hasOnly(['joinedUids', 'leftUids']);
+
+        allow update: if invited()
+                      && request.auth.uid == resource.data.callerUid
+                      && resource.data.status in ['ringing', 'active']
+                      && request.resource.data.status == 'ended'
+                      && request.resource.data.endedAt == request.time
+                      && changed().hasOnly(['status', 'endedAt']);
+
+        allow delete: if isOwner(orgId)
+                      || (
+                        invited()
+                        && request.auth.uid == resource.data.callerUid
+                      );
+
+        match /peers/{peerId} {
+          function onGroupCall() {
+            return isActiveMember(orgId)
+                   && request.auth.uid in groupCallDoc(orgId, callId).invitedUids;
+          }
+
+          // An invite grants access to the call document, not to every other
+          // pair's network metadata. Only the two endpoints may read the SDP
+          // and candidates for their own direct connection.
+          allow read: if isOwner(orgId)
+                      || (onGroupCall()
+                      && (
+                        request.auth.uid == resource.data.offererUid
+                        || request.auth.uid == resource.data.answererUid
+                      ));
+
+          allow create: if onGroupCall()
+                        && request.resource.data.offererUid == request.auth.uid
+                        && request.resource.data.offererUid in groupCallDoc(orgId, callId).joinedUids
+                        && request.resource.data.answererUid in groupCallDoc(orgId, callId).joinedUids
+                        && request.resource.data.createdAt == request.time
+                        && request.resource.data.keys().hasOnly([
+                          'offererUid', 'answererUid', 'createdAt'
+                        ]);
+
+          allow update: if onGroupCall()
+                        && (
+                          (
+                            request.auth.uid == resource.data.offererUid
+                            && changed().hasOnly(['offer'])
+                          )
+                          || (
+                            request.auth.uid == resource.data.answererUid
+                            && changed().hasOnly(['answer'])
+                          )
+                        );
+
+          allow delete: if isOwner(orgId);
+
+          match /{candidateSide}/{candidateId} {
+            function peerData() {
+              return get(/databases/$(database)/documents/organizations/$(orgId)/groupCalls/$(callId)/peers/$(peerId)).data;
+            }
+
+            allow read: if isOwner(orgId)
+                        || (isActiveMember(orgId)
+                        && (
+                          request.auth.uid == peerData().offererUid
+                          || request.auth.uid == peerData().answererUid
+                        ));
+            allow create: if isActiveMember(orgId)
+                          && (
+                            (
+                              candidateSide == 'offerCandidates'
+                              && request.auth.uid == peerData().offererUid
+                            )
+                            || (
+                              candidateSide == 'answerCandidates'
+                              && request.auth.uid == peerData().answererUid
+                            )
+                          )
+                          && request.resource.data.keys().hasOnly([
+                            'candidate', 'sdpMid', 'sdpMLineIndex'
+                          ]);
+            allow update: if false;
+            allow delete: if isOwner(orgId);
+          }
+        }
+      }
+
+      // -------------------------------------------------------------
+      // teams/{teamId} -- working groups
+      //
+      // Readable by the whole company: who works with whom is not
+      // confidential, and hiding it would make the directory less useful.
+      // Membership confers nothing -- being in a team never lets you approve,
+      // assign or view anything you could not already.
+      //
+      // Forming one is the GM's, or anyone individually granted manageTeams.
+      // A team cuts across departments and reporting lines, so drawing one is
+      // organizational design rather than day-to-day people admin.
+      // -------------------------------------------------------------
+      match /teams/{teamId} {
+        allow read: if isActiveMember(orgId);
+
+        allow create: if can(orgId, 'gm', 'manageTeams')
+                      && request.resource.data.createdByUid == request.auth.uid
+                      && request.resource.data.memberUids.size() > 0;
+
+        allow update: if can(orgId, 'gm', 'manageTeams')
+                      && changed().hasOnly([
+                        'name', 'description', 'memberUids', 'leadUid'
+                      ]);
+
+        allow delete: if can(orgId, 'gm', 'manageTeams');
+      }
+
+      // -------------------------------------------------------------
+      // chats/{chatId} -- group and direct conversations
+      //
+      // The member list on the conversation is the access control list for
+      // everything under it. Nothing here is readable to a colleague who is
+      // not in the thread, which is the one place in this app where being a
+      // member of the company is deliberately not enough.
+      // -------------------------------------------------------------
+      match /chats/{chatId} {
+        function inThread() {
+          return isActiveMember(orgId)
+                 && request.auth.uid in resource.data.memberUids;
+        }
+
+        function isMyDirectChatId() {
+          return chatId.matches('dm_' + request.auth.uid + '_.*')
+                 || chatId.matches('dm_.*_' + request.auth.uid);
+        }
+
+        // The MD needs a complete listing only for recursive organization
+        // deletion; everyone else remains constrained to the thread ACL.
+        allow get: if isTopRole(orgId)
+                   || inThread()
+                   // openDirect checks its deterministic id before creating
+                   // it. A missing document has no memberUids to inspect, so
+                   // permit only a non-existent DM id containing this caller.
+                   || (
+                     isActiveMember(orgId)
+                     && isMyDirectChatId()
+                     && !exists(/databases/$(database)/documents/organizations/$(orgId)/chats/$(chatId))
+                   );
+        allow list: if isTopRole(orgId) || inThread();
+
+        // You cannot create a conversation you are not part of.
+        allow create: if isActiveMember(orgId)
+                      && request.auth.uid in request.resource.data.memberUids
+                      && request.resource.data.createdByUid == request.auth.uid;
+
+        function isCreator() {
+          return resource.data.createdByUid == request.auth.uid;
+        }
+
+        // Sending a message. Any member may move the preview forward, and
+        // nothing else -- this is the write every message makes.
+        allow update: if inThread()
+                      && changed().hasOnly([
+                        'lastMessage', 'lastMessageAt',
+                        'lastSenderName', 'lastSenderUid'
+                      ]);
+
+        // Blocking. You may only ever add or remove yourself from the block
+        // list, never somebody else.
+        allow update: if inThread()
+                      && changed().hasOnly(['blockedBy'])
+                      && request.resource.data.blockedBy
+                           .removeAll(resource.data.get('blockedBy', []))
+                           .hasOnly([request.auth.uid])
+                      && resource.data.get('blockedBy', [])
+                           .removeAll(request.resource.data.blockedBy)
+                           .hasOnly([request.auth.uid]);
+
+        // Leaving. You may take yourself off the roster, and the result must
+        // no longer contain you -- which is what stops this being a way to
+        // remove somebody else.
+        allow update: if inThread()
+                      && changed().hasOnly(['memberUids'])
+                      && !(request.auth.uid in request.resource.data.memberUids)
+                      && request.resource.data.memberUids.size()
+                         == resource.data.memberUids.size() - 1
+                      && request.resource.data.memberUids.hasAll(
+                        resource.data.memberUids.removeAll([request.auth.uid])
+                      );
+
+        // The group itself -- its name, description, and who is in it --
+        // belongs to whoever created it, and they cannot write themselves out
+        // of it by this route.
+        allow update: if inThread()
+                      && isCreator()
+                      && changed().hasOnly(['name', 'description', 'memberUids'])
+                      && request.auth.uid in request.resource.data.memberUids;
+
+        allow delete: if isTopRole(orgId)
+                      || (inThread()
+                          && resource.data.createdByUid == request.auth.uid);
+
+        match /messages/{messageId} {
+          function parentChat() {
+            return get(/databases/$(database)/documents/organizations/$(orgId)/chats/$(chatId)).data;
+          }
+
+          function inParentThread() {
+            return isActiveMember(orgId)
+                   && request.auth.uid in parentChat().memberUids;
+          }
+
+          // As with parent threads, the MD needs to enumerate messages before
+          // Firestore can delete them; Firestore has no cascading delete.
+          allow read: if isTopRole(orgId) || inParentThread();
+
+          // Sent as yourself, stamped by the server. A client-supplied time
+          // would let anyone forge the order of a conversation.
+          // A block freezes the thread for everyone in it, including the
+          // person who set it. Letting the blocker keep talking while the
+          // other side cannot answer would be worse than not having it.
+          allow create: if inParentThread()
+                        && request.resource.data.senderUid == request.auth.uid
+                        && request.resource.data.sentAt == request.time
+                        && parentChat().get('blockedBy', []).size() == 0;
+
+          // Messages are a record. Nobody edits history, and only the author
+          // can retract their own.
+          allow update: if false;
+          // Your own message, always. The group's creator too, because
+          // deleting a group means clearing its messages first -- Firestore
+          // has no cascading delete, and orphaned messages stay billable and
+          // reachable by direct path.
+          allow delete: if isTopRole(orgId)
+                        || (inParentThread()
+                            && (resource.data.senderUid == request.auth.uid
+                                || parentChat().createdByUid == request.auth.uid));
+        }
+      }
+
+      // -------------------------------------------------------------
+      // announcements/{announcementId}
+      // -------------------------------------------------------------
+      match /announcements/{announcementId} {
+        allow read: if isActiveMember(orgId);
+
+        allow create: if can(orgId, 'hr', 'postAnnouncements')
+                      && request.resource.data.authorUid == request.auth.uid;
+
+        allow update: if can(orgId, 'hr', 'postAnnouncements');
+
+        allow delete: if can(orgId, 'hr', 'postAnnouncements')
+                      || (
+                        isActiveMember(orgId)
+                        && resource.data.authorUid == request.auth.uid
+                      );
+      }
+    }
+  }
+}
