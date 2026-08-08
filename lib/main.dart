@@ -45,10 +45,6 @@ Future<void> main() async {
   runApp(const OffixiaApp());
 }
 
-/// Held at the app level so the session gate can clear pushed routes when the
-/// session ends. See [_SessionGate].
-final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
-
 class OffixiaApp extends StatelessWidget {
   const OffixiaApp({super.key});
 
@@ -56,14 +52,21 @@ class OffixiaApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return ValueListenableBuilder<ThemeMode>(
       valueListenable: ThemeService.instance.mode,
-      builder: (context, mode, _) => MaterialApp(
-        title: 'Offixia',
-        debugShowCheckedModeBanner: false,
-        navigatorKey: appNavigatorKey,
-        theme: AppTheme.light(),
-        darkTheme: AppTheme.dark(),
-        themeMode: mode,
-        home: const _SessionGate(),
+      builder: (context, mode, _) => ValueListenableBuilder<Session>(
+        valueListenable: SessionService.instance.state,
+        builder: (context, session, _) => MaterialApp(
+          // A different session category gets a fresh Navigator. This removes
+          // every route belonging to the previous organization as one widget
+          // subtree, instead of mutating the route stack in a post-frame
+          // callback while Flutter is also replacing the home screen.
+          key: ValueKey(session.runtimeType),
+          title: 'Offixia',
+          debugShowCheckedModeBanner: false,
+          theme: AppTheme.light(),
+          darkTheme: AppTheme.dark(),
+          themeMode: mode,
+          home: _SessionHome(session: session),
+        ),
       ),
     );
   }
@@ -74,48 +77,23 @@ class OffixiaApp extends StatelessWidget {
 /// The switch is exhaustive over the sealed [Session] hierarchy, so a new state
 /// added later fails to compile here rather than silently falling through to a
 /// blank screen.
-class _SessionGate extends StatelessWidget {
-  const _SessionGate();
+class _SessionHome extends StatelessWidget {
+  const _SessionHome({required this.session});
+
+  final Session session;
 
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<Session>(
-      valueListenable: SessionService.instance.state,
-      builder: (context, session, _) {
-        // The gate only controls what sits *under* the navigator. Anything
-        // pushed on top of the shell -- Profile, an employee record, a chat
-        // thread -- survives a session change and keeps covering the new
-        // screen. That is why signing out from Profile looked like it did
-        // nothing: auth had ended and the sign-in screen was already
-        // underneath, hidden by the route the user was still standing on.
-        if (session is! SessionReady) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            appNavigatorKey.currentState?.popUntil((route) => route.isFirst);
-          });
-        }
-
-        final screen = switch (session) {
-          SessionLoading() => const _Splash(),
-          SessionSignedOut() => const SignInScreen(),
-          SessionNeedsOrg() => const OnboardingScreen(),
-          SessionSuspended(organization: final org) => SuspendedScreen(
-            organization: org,
-          ),
-          SessionReady() => const HomeShell(),
-          SessionFailed(message: final message) => _Failed(message: message),
-        };
-
-        // Keyed by runtime type so switching states animates, but a rebuild
-        // within the same state does not restart the transition.
-        return AnimatedSwitcher(
-          duration: const Duration(milliseconds: 220),
-          child: KeyedSubtree(
-            key: ValueKey(session.runtimeType),
-            child: screen,
-          ),
-        );
-      },
-    );
+    return switch (session) {
+      SessionLoading() => const _Splash(),
+      SessionSignedOut() => const SignInScreen(),
+      SessionNeedsOrg() => const OnboardingScreen(),
+      SessionSuspended(organization: final org) => SuspendedScreen(
+        organization: org,
+      ),
+      SessionReady() => const HomeShell(),
+      SessionFailed(message: final message) => _Failed(message: message),
+    };
   }
 }
 

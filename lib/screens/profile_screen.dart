@@ -246,10 +246,9 @@ class _OrganizationExitCardState extends State<_OrganizationExitCard> {
     final negative = AppSurfaces.of(context).negative;
     try {
       await action();
-      // Membership removal changes the global session gate to Create/Join.
-      // That gate owns route cleanup; trying to pop here as well races its
-      // post-frame navigation and can produce a red Flutter assertion even
-      // though the deletion itself succeeded.
+      // Membership removal rebuilds the app-level Navigator at Create/Join.
+      // Route cleanup belongs to that session transition; this screen must not
+      // try to pop itself while its own widget subtree is being disposed.
     } catch (error) {
       messenger.showSnackBar(
         SnackBar(
