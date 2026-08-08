@@ -389,3 +389,9 @@ itself.
 - Firebase project selection is kept in `.firebaserc`. Firebase's Android
   client configuration contains public project identifiers rather than a
   server credential; signing keys and service-account credentials stay local.
+
+## Copyright
+
+Copyright © 2026 Offixia. All rights reserved. See [`COPYRIGHT`](COPYRIGHT) for
+the repository's usage terms. Third-party dependencies remain subject to their
+respective licenses.
