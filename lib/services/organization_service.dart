@@ -397,13 +397,23 @@ class OrganizationService {
     }
     await _deleteAll(Db.chats(orgId));
 
-    await _deleteEmployeesOwnerLast(employees.docs, ownerUid);
+    // Keep the owner's employee record until the final atomic batch. The live
+    // session uses that record as its authorization proof; deleting it early
+    // makes the UI react to a half-deleted organization and can surface a
+    // transient permission error even though cleanup subsequently succeeds.
+    await _deleteOtherEmployees(employees.docs, ownerUid);
 
-    // The join code and every membership pointer go too, so no one is left
-    // holding a reference to a company that is gone.
-    await _deleteMemberships(memberUids);
+    // Remove everyone else's pointer while the owner record and organization
+    // still exist to authorize those writes. The owner's own pointer belongs
+    // in the final batch so the session observes one completed transition.
+    await _deleteOtherMemberships(memberUids, ownerUid);
 
     final batch = firestore.batch();
+    final ownerEmployee = employees.docs
+        .where((doc) => doc.id == ownerUid)
+        .firstOrNull;
+    if (ownerEmployee != null) batch.delete(ownerEmployee.reference);
+    batch.delete(Db.memberships.doc(ownerUid));
     if (joinCode != null && joinCode.isNotEmpty) {
       batch.delete(Db.joinCodes.doc(joinCode));
     }
@@ -411,7 +421,7 @@ class OrganizationService {
     await batch.commit();
   }
 
-  Future<void> _deleteEmployeesOwnerLast(
+  Future<void> _deleteOtherEmployees(
     List<QueryDocumentSnapshot<Map<String, dynamic>>> employees,
     String ownerUid,
   ) async {
@@ -424,19 +434,17 @@ class OrganizationService {
       }
       await batch.commit();
     }
-
-    // A batch that also removes other employees can lose the MD role proof
-    // while those other deletes are evaluated. The owner's self-delete is a
-    // separate write so authorization never depends on batch evaluation order.
-    final owner = employees.where((doc) => doc.id == ownerUid).firstOrNull;
-    if (owner != null) await owner.reference.delete();
   }
 
-  Future<void> _deleteMemberships(List<String> memberUids) async {
-    for (var start = 0; start < memberUids.length; start += 400) {
-      final end = min(start + 400, memberUids.length);
+  Future<void> _deleteOtherMemberships(
+    List<String> memberUids,
+    String ownerUid,
+  ) async {
+    final others = memberUids.where((uid) => uid != ownerUid).toList();
+    for (var start = 0; start < others.length; start += 400) {
+      final end = min(start + 400, others.length);
       final batch = FirebaseFirestore.instance.batch();
-      for (final uid in memberUids.sublist(start, end)) {
+      for (final uid in others.sublist(start, end)) {
         batch.delete(Db.memberships.doc(uid));
       }
       await batch.commit();

@@ -388,4 +388,22 @@ describe('active membership and common workflows', () => {
     await assertSucceeds(deleteDoc(candidate));
     await assertSucceeds(deleteDoc(doc(db, `${orgPath('org1')}/calls/call1`)));
   });
+
+  test('the founder completes owner, membership, code, and org deletion atomically', async () => {
+    await seedOrganization();
+    await seedMember('org1', 'worker');
+    const db = auth('owner');
+
+    const workerBatch = writeBatch(db);
+    workerBatch.delete(doc(db, employeePath('org1', 'worker')));
+    workerBatch.delete(doc(db, 'memberships/worker'));
+    await assertSucceeds(workerBatch.commit());
+
+    const finalBatch = writeBatch(db);
+    finalBatch.delete(doc(db, employeePath('org1', 'owner')));
+    finalBatch.delete(doc(db, 'memberships/owner'));
+    finalBatch.delete(doc(db, 'joinCodes/ABC234'));
+    finalBatch.delete(doc(db, orgPath('org1')));
+    await assertSucceeds(finalBatch.commit());
+  });
 });

@@ -206,6 +206,11 @@ class SessionService {
 
     _employeeSub = Db.employees(orgId).doc(user.uid).snapshots().listen(
       (snapshot) {
+        // Leaving and organization deletion remove membership and employee in
+        // one batch. Ignore the optimistic local employee deletion just as the
+        // membership listener does, so the UI reacts only after Firestore has
+        // acknowledged the complete transition.
+        if (snapshot.metadata.hasPendingWrites) return;
         if (!snapshot.exists) {
           _recoverMissingEmployee(user);
           return;

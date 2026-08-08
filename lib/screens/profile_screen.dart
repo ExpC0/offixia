@@ -242,15 +242,14 @@ class _OrganizationExitCardState extends State<_OrganizationExitCard> {
 
   Future<void> _run(Future<void> Function() action) async {
     setState(() => _busy = true);
-    final navigator = Navigator.of(context);
     final messenger = ScaffoldMessenger.of(context);
     final negative = AppSurfaces.of(context).negative;
     try {
       await action();
-      // Profile is pushed above the session gate. Membership removal changes
-      // that gate to Create/Join; collapsing the old route reveals it at once
-      // while keeping Google authentication intact for the next company.
-      navigator.popUntil((route) => route.isFirst);
+      // Membership removal changes the global session gate to Create/Join.
+      // That gate owns route cleanup; trying to pop here as well races its
+      // post-frame navigation and can produce a red Flutter assertion even
+      // though the deletion itself succeeded.
     } catch (error) {
       messenger.showSnackBar(
         SnackBar(
