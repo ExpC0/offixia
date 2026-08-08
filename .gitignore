@@ -45,6 +45,10 @@ migrate_working_dir/
 firebase-debug.log
 firestore-debug.log
 
+# Local screenshot intake. Reviewed, publication-safe copies live in
+# /docs/screenshots/ under descriptive filenames.
+/ss/
+
 # Symbolication related
 app.*.symbols
 
