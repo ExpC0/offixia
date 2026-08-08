@@ -1,6 +1,11 @@
 # Offixia
 
-**A focused office operations and communication app for Android.**
+**A focused office operations and communication workspace for Android.**
+
+[![Quality and security](https://github.com/ExpC0/offixia/actions/workflows/quality.yml/badge.svg)](https://github.com/ExpC0/offixia/actions/workflows/quality.yml)
+[![CodeQL](https://github.com/ExpC0/offixia/actions/workflows/codeql.yml/badge.svg)](https://github.com/ExpC0/offixia/actions/workflows/codeql.yml)
+![Flutter 3.44.8](https://img.shields.io/badge/Flutter-3.44.8-02569B?logo=flutter&logoColor=white)
+![Android API 24+](https://img.shields.io/badge/Android-API%2024%2B-3DDC84?logo=android&logoColor=white)
 
 Offixia brings attendance, leave, tasks, teams, announcements, messaging, and
 peer-to-peer calls into one organization-scoped workspace. It is built with
@@ -10,13 +15,58 @@ Cloud Firestore Security Rules.
 > Status: actively developed and distributed by direct APK installation. It is
 > not currently published to an app store.
 
+## Preview
+
+<table>
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/01-dashboard.jpg" width="300" alt="Offixia dashboard with attendance and company overview" />
+      <br />
+      <sub><strong>Workday dashboard</strong></sub>
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/04-team-attendance.jpg" width="300" alt="Team attendance overview" />
+      <br />
+      <sub><strong>Team attendance</strong></sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/07-directory.jpg" width="300" alt="Organization directory with teams and employees" />
+      <br />
+      <sub><strong>People and teams</strong></sub>
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/14-group-call.jpg" width="300" alt="Encrypted peer-to-peer group call" />
+      <br />
+      <sub><strong>Peer-to-peer group calls</strong></sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/18-create-organization.jpg" width="300" alt="Create an organization and choose its nine-hour workday" />
+      <br />
+      <sub><strong>Create an organization</strong></sub>
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/20-join-organization.jpg" width="300" alt="Join an organization with a six-character invite code" />
+      <br />
+      <sub><strong>Join an existing team</strong></sub>
+    </td>
+  </tr>
+</table>
+
+Screenshots use a disposable demo organization and fictional sample data; no
+production account or active access credential is shown. See the
+[complete product gallery](docs/screenshots/README.md) for every captured flow.
+
 ## Product experience
 
 The interface uses a purpose-built light and dark design system, bundled Inter
 fonts, calm surface hierarchy, and restrained motion. No font or visual asset
-is downloaded at runtime. Publication screenshots are intentionally omitted
-until a fresh demo organization can be captured without employee details,
-organization access codes, notifications, or device identifiers.
+is downloaded at runtime. Navigation follows the authenticated organization
+session, so leaving or deleting a workspace returns cleanly to onboarding
+without signing the Google account out.
 
 ## What Offixia does
 
@@ -116,7 +166,7 @@ application, a participant can still capture media on their own device.
 
 ```text
 lib/
-├── main.dart                 Firebase startup and exhaustive session gate
+├── main.dart                 Firebase startup and exhaustive session host
 ├── theme.dart                light/dark design system and semantic surfaces
 ├── format.dart               date, time, and duration formatting
 ├── config.dart               build-time application configuration
@@ -133,8 +183,10 @@ or Bloc layer.
 `SessionService` resolves the live chain from Firebase Authentication to the
 user's membership, organization, and employee record. The result is one sealed
 state: loading, signed out, needs organization, suspended, ready, or failed.
-The app gate switches over it exhaustively, so introducing a new state without
-handling it is a compile-time error.
+The app host switches over it exhaustively, so introducing a new state without
+handling it is a compile-time error. A change between session categories also
+replaces the root Navigator, ensuring routes from a former organization cannot
+remain visible after sign-out, suspension, leaving, or deletion.
 
 ### Firestore layout
 
@@ -304,13 +356,14 @@ git diff --check
 
 Automated tests currently cover the role ladder, grant behavior, leave
 decision boundaries, office-hour invariants, employee formatting, attendance
-identity/durations, inclusive leave days, and task overdue behavior. Firestore
-emulator tests additionally cover organization-entry forgery, join codes,
-invites, suspended accounts, employee attendance, direct-message creation,
-chat departure, and recursive signaling cleanup. Calling still requires
-two-device testing because microphone focus, OEM audio routing, ringtone policy,
-NAT traversal, and remote hang-up behavior live below Flutter's unit-test
-boundary.
+identity/durations, inclusive leave days, task overdue behavior, group-call
+capacity, and safe dialog disposal during organization exit. Firestore emulator
+tests additionally cover organization-entry forgery, join codes, invites,
+suspended accounts, employee attendance, direct-message creation, chat
+departure, organization deletion, and recursive signaling cleanup. Calling
+still requires two-device testing because microphone focus, OEM audio routing,
+ringtone policy, NAT traversal, and remote hang-up behavior live below
+Flutter's unit-test boundary.
 
 GitHub Actions repeats the Flutter and Firestore gates on every change. Action
 dependencies are pinned to immutable commit SHAs, the Gradle wrapper and

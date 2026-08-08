@@ -11,6 +11,7 @@ import '../services/organization_service.dart';
 import '../services/theme_service.dart';
 import '../theme.dart';
 import '../widgets/avatar.dart';
+import '../widgets/settled_dialog.dart';
 import '../widgets/status_chip.dart';
 import '../widgets/ui.dart';
 
@@ -168,7 +169,7 @@ class _OrganizationExitCardState extends State<_OrganizationExitCard> {
   bool _busy = false;
 
   Future<void> _leave() async {
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showSettledDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Leave organization?'),
@@ -198,7 +199,7 @@ class _OrganizationExitCardState extends State<_OrganizationExitCard> {
 
   Future<void> _delete() async {
     final controller = TextEditingController();
-    final confirmation = await showDialog<String>(
+    final confirmation = await showSettledDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Delete organization?'),
