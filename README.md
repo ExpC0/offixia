@@ -15,6 +15,14 @@ Cloud Firestore Security Rules.
 > Status: actively developed and distributed by direct APK installation. It is
 > not currently published to an app store.
 
+## Download
+
+[**Download the latest signed Android APK**](https://github.com/ExpC0/offixia/releases/latest)
+
+The current public build supports ARM64 phones running Android 7.0 (API 24) or
+newer. Each release includes a SHA-256 checksum file so the downloaded APK can
+be verified before installation.
+
 ## Preview
 
 <table>
