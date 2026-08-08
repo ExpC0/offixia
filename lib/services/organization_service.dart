@@ -99,47 +99,71 @@ class OrganizationService {
       throw Exception('That invite code does not match any organization.');
     }
 
-    await FirebaseFirestore.instance.runTransaction((tx) async {
-      // Re-read both documents inside the transaction. If the owner rotates
-      // the code while somebody is joining, Firestore retries against the new
-      // state instead of admitting them using a stale lookup.
-      final lookup = await tx.get(lookupRef);
-      final currentOrgId = lookup.data()?['orgId'] as String?;
-      if (currentOrgId == null || currentOrgId != orgId) {
-        throw Exception('That invite code is no longer active.');
-      }
-
-      final orgRef = Db.org(orgId);
-      final org = await tx.get(orgRef);
-      final data = org.data();
-      if (data == null || data['joinCode'] != code) {
-        throw Exception('That invite code is no longer active.');
-      }
-
-      final employeeId = _employeeIdFor(data);
-      final seq = (data['nextEmployeeSeq'] as num?)?.toInt() ?? 1;
-      tx.update(orgRef, {'nextEmployeeSeq': seq + 1});
-      tx.set(Db.employees(orgId).doc(user.uid), {
-        'employeeId': employeeId,
-        'name': user.displayName ?? 'New employee',
-        'email': user.email ?? '',
-        'photoUrl': user.photoURL ?? '',
-        'role': Role.employee.name,
-        'department': '',
-        'jobTitle': '',
-        'phone': '',
-        'managerUid': null,
-        'active': true,
-        'joinedAt': FieldValue.serverTimestamp(),
-      });
-      tx.set(Db.memberships.doc(user.uid), {
-        'orgId': orgId,
-        // The rules validate this proof against both the organization and the
-        // non-queryable lookup document. It is private to this user.
-        'joinCode': code,
-        'joinedAt': FieldValue.serverTimestamp(),
-      });
+    // The transaction must read the organization to allocate its next staff
+    // number, but a non-member ordinarily cannot read an organization. This
+    // private, short-lived document proves to the rules that this user has
+    // supplied a currently valid code. It grants no access to subcollections
+    // and is removed in the successful transaction.
+    final attemptRef = Db.joinAttempts.doc(user.uid);
+    await attemptRef.set({
+      'orgId': orgId,
+      'joinCode': code,
+      'createdAt': FieldValue.serverTimestamp(),
     });
+
+    try {
+      await FirebaseFirestore.instance.runTransaction((tx) async {
+        // Re-read both documents inside the transaction. If the owner rotates
+        // the code while somebody is joining, Firestore retries against the
+        // new state instead of admitting them using a stale lookup.
+        final lookup = await tx.get(lookupRef);
+        final currentOrgId = lookup.data()?['orgId'] as String?;
+        if (currentOrgId == null || currentOrgId != orgId) {
+          throw Exception('That invite code is no longer active.');
+        }
+
+        final orgRef = Db.org(orgId);
+        final org = await tx.get(orgRef);
+        final data = org.data();
+        if (data == null || data['joinCode'] != code) {
+          throw Exception('That invite code is no longer active.');
+        }
+
+        final employeeId = _employeeIdFor(data);
+        final seq = (data['nextEmployeeSeq'] as num?)?.toInt() ?? 1;
+        tx.update(orgRef, {'nextEmployeeSeq': seq + 1});
+        tx.set(Db.employees(orgId).doc(user.uid), {
+          'employeeId': employeeId,
+          'name': user.displayName ?? 'New employee',
+          'email': user.email ?? '',
+          'photoUrl': user.photoURL ?? '',
+          'role': Role.employee.name,
+          'department': '',
+          'jobTitle': '',
+          'phone': '',
+          'managerUid': null,
+          'active': true,
+          'joinedAt': FieldValue.serverTimestamp(),
+        });
+        tx.set(Db.memberships.doc(user.uid), {
+          'orgId': orgId,
+          // The rules validate this proof against both the organization and
+          // the non-queryable lookup document. It is private to this user.
+          'joinCode': code,
+          'joinedAt': FieldValue.serverTimestamp(),
+        });
+        tx.delete(attemptRef);
+      });
+    } finally {
+      // Clean up after a network error or a code rotation too. This is safe to
+      // repeat after success because deleting a missing document is harmless.
+      try {
+        await attemptRef.delete();
+      } catch (_) {
+        // The next attempt overwrites this same private document. Never hide
+        // the useful join error just because best-effort cleanup failed.
+      }
+    }
   }
 
   /// Accepts an emailed invite: joins the company with the designation,

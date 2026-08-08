@@ -10,12 +10,15 @@ typedef JsonDoc = DocumentReference<Json>;
 /// org the tenant boundary: a security rule written once at that level covers
 /// the whole subtree, and no query can accidentally reach across companies.
 ///
-/// The two exceptions are deliberate, and both exist to answer a question the
+/// The three exceptions are deliberate, and all exist to answer a question the
 /// caller has *before* it knows an org id:
 ///   - `memberships/{uid}` -- "which company do I belong to?", read at sign-in.
 ///   - `joinCodes/{code}`  -- "which company does this invite code mean?",
 ///     read by someone who is not a member of anything yet. Keeping it separate
 ///     is what avoids granting new users permission to list every organization.
+///   - `joinAttempts/{uid}` -- short-lived proof that this user supplied a
+///     currently valid code, allowing the join transaction to read only the
+///     organization that code names.
 class Db {
   Db._();
 
@@ -70,4 +73,7 @@ class Db {
   static JsonCollection get memberships => _firestore.collection('memberships');
 
   static JsonCollection get joinCodes => _firestore.collection('joinCodes');
+
+  static JsonCollection get joinAttempts =>
+      _firestore.collection('joinAttempts');
 }

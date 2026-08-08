@@ -132,6 +132,19 @@ service cloud.firestore {
              && myInvite().orgId == orgId;
     }
 
+    function myJoinAttempt() {
+      return get(/databases/$(database)/documents/joinAttempts/$(request.auth.uid)).data;
+    }
+
+    function hasJoinAttemptTo(orgId) {
+      return signedIn()
+             && exists(/databases/$(database)/documents/joinAttempts/$(request.auth.uid))
+             && myJoinAttempt().orgId == orgId
+             && myJoinAttempt().joinCode is string
+             && exists(/databases/$(database)/documents/joinCodes/$(myJoinAttempt().joinCode))
+             && get(/databases/$(database)/documents/joinCodes/$(myJoinAttempt().joinCode)).data.orgId == orgId;
+    }
+
     // Fields the request leaves untouched. Used to prove an update changed
     // nothing outside an allowed set.
     function changed() {
@@ -253,6 +266,31 @@ service cloud.firestore {
     }
 
     // ---------------------------------------------------------------
+    // joinAttempts/{uid} -- temporary proof for a code-based join.
+    //
+    // A joiner must read the organization inside a transaction to allocate a
+    // staff number. This private document ties that read to a code they have
+    // actually supplied, without making organization documents public to
+    // every signed-in account. It is deleted by the successful transaction.
+    // ---------------------------------------------------------------
+    match /joinAttempts/{uid} {
+      allow read, delete: if signedIn() && request.auth.uid == uid;
+
+      allow create, update: if signedIn()
+                            && request.auth.uid == uid
+                            && !exists(/databases/$(database)/documents/memberships/$(uid))
+                            && request.resource.data.keys().hasOnly([
+                              'orgId', 'joinCode', 'createdAt'
+                            ])
+                            && request.resource.data.orgId is string
+                            && request.resource.data.joinCode is string
+                            && request.resource.data.createdAt == request.time
+                            && exists(/databases/$(database)/documents/joinCodes/$(request.resource.data.joinCode))
+                            && get(/databases/$(database)/documents/joinCodes/$(request.resource.data.joinCode)).data.orgId
+                               == request.resource.data.orgId;
+    }
+
+    // ---------------------------------------------------------------
     // invites/{email} -- a place held for someone who has not signed in yet.
     //
     // The app cannot create a Firebase Auth account for another person, so
@@ -298,6 +336,10 @@ service cloud.firestore {
       // delete. Reading the pointed-to org lets startup reach self-repair.
       allow read: if membershipPointsTo(orgId);
       allow read: if isActiveMember(orgId);
+      // Before membership exists, only a current code proof or the caller's
+      // own email invitation may authorize this one parent-document read.
+      // Neither path opens any organization subcollection.
+      allow get: if hasJoinAttemptTo(orgId) || hasInviteTo(orgId);
 
       // Anyone signed in may create an org, but only naming themselves owner.
       allow create: if signedIn()

@@ -141,6 +141,7 @@ handling it is a compile-time error.
 ```text
 memberships/{uid}                         user's current organization
 joinCodes/{code}                          pre-membership organization lookup
+joinAttempts/{uid}                        short-lived private code proof
 invites/{normalizedEmail}                 role-aware email invitation
 organizations/{orgId}
 ├── employees/{uid}                       identity, role, grants, reporting line

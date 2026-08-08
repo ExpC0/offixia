@@ -14,6 +14,7 @@ import {
   getDoc,
   getDocs,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   updateDoc,
@@ -163,6 +164,48 @@ describe('organization entry boundaries', () => {
     await assertSucceeds(batch.commit());
   });
 
+  test('allows the real code-join transaction to read the organization first', async () => {
+    await seedOrganization();
+    const db = auth('transaction-joiner');
+    const lookupRef = doc(db, 'joinCodes/ABC234');
+    await setDoc(doc(db, 'joinAttempts/transaction-joiner'), {
+      orgId: 'org1',
+      joinCode: 'ABC234',
+      createdAt: serverTimestamp(),
+    });
+
+    await assertSucceeds(runTransaction(db, async (tx) => {
+      const lookup = await tx.get(lookupRef);
+      const orgId = lookup.data().orgId;
+      const orgRef = doc(db, orgPath(orgId));
+      const org = await tx.get(orgRef);
+      const seq = org.data().nextEmployeeSeq;
+
+      tx.update(orgRef, { nextEmployeeSeq: seq + 1 });
+      tx.set(doc(db, employeePath(orgId, 'transaction-joiner')), {
+        ...employee('transaction-joiner', 'employee', true, 'OFX0002'),
+        joinedAt: serverTimestamp(),
+      });
+      tx.set(doc(db, 'memberships/transaction-joiner'), {
+        orgId,
+        joinCode: 'ABC234',
+        joinedAt: serverTimestamp(),
+      });
+      tx.delete(doc(db, 'joinAttempts/transaction-joiner'));
+    }));
+  });
+
+  test('a non-member cannot read an organization without a valid join proof', async () => {
+    await seedOrganization();
+    const db = auth('outsider');
+    await assertFails(getDoc(doc(db, orgPath('org1'))));
+    await assertFails(setDoc(doc(db, 'joinAttempts/outsider'), {
+      orgId: 'org1',
+      joinCode: 'WRONG2',
+      createdAt: serverTimestamp(),
+    }));
+  });
+
   test('cannot enumerate, create, or squat join codes', async () => {
     await seedOrganization();
     const db = auth('outsider');
@@ -206,6 +249,11 @@ describe('organization entry boundaries', () => {
         createdAt: new Date('2026-01-01T00:00:00Z'),
       });
     });
+
+    await assertSucceeds(getDoc(doc(
+      auth('invitee', 'invitee@example.test'),
+      orgPath('org1'),
+    )));
 
     const makeBatch = (role) => {
       const db = auth('invitee', 'invitee@example.test');
